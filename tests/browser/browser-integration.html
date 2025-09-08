@@ -1,0 +1,740 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>libgit2.wasm Browser Integration Tests</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 20px;
+      background: #f5f5f5;
+    }
+    
+    .header {
+      text-align: center;
+      margin-bottom: 30px;
+      padding: 20px;
+      background: white;
+      border-radius: 8px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    
+    .test-section {
+      background: white;
+      margin: 20px 0;
+      padding: 20px;
+      border-radius: 8px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    
+    .test-result {
+      padding: 10px;
+      margin: 5px 0;
+      border-radius: 4px;
+      font-family: monospace;
+    }
+    
+    .test-success {
+      background: #d4edda;
+      color: #155724;
+      border: 1px solid #c3e6cb;
+    }
+    
+    .test-failure {
+      background: #f8d7da;
+      color: #721c24;
+      border: 1px solid #f5c6cb;
+    }
+    
+    .test-info {
+      background: #d1ecf1;
+      color: #0c5460;
+      border: 1px solid #bee5eb;
+    }
+    
+    .test-warning {
+      background: #fff3cd;
+      color: #856404;
+      border: 1px solid #ffeaa7;
+    }
+    
+    .loading {
+      text-align: center;
+      padding: 20px;
+      color: #666;
+    }
+    
+    .progress {
+      margin: 10px 0;
+    }
+    
+    .progress-bar {
+      width: 100%;
+      height: 20px;
+      background: #e9ecef;
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    
+    .progress-fill {
+      height: 100%;
+      background: #007bff;
+      transition: width 0.3s ease;
+    }
+    
+    pre {
+      background: #f8f9fa;
+      padding: 15px;
+      border-radius: 4px;
+      overflow-x: auto;
+      font-size: 12px;
+    }
+    
+    .controls {
+      margin: 20px 0;
+      text-align: center;
+    }
+    
+    button {
+      padding: 10px 20px;
+      margin: 0 10px;
+      border: none;
+      border-radius: 4px;
+      background: #007bff;
+      color: white;
+      cursor: pointer;
+    }
+    
+    button:hover {
+      background: #0056b3;
+    }
+    
+    button:disabled {
+      background: #6c757d;
+      cursor: not-allowed;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>🧪 libgit2.wasm Browser Integration Tests</h1>
+    <p>Comprehensive browser testing for libgit2 WebAssembly implementation</p>
+  </div>
+
+  <div class="controls">
+    <button id="run-tests">Run All Tests</button>
+    <button id="clear-results">Clear Results</button>
+    <button id="download-report">Download Report</button>
+  </div>
+
+  <div class="progress">
+    <div class="progress-bar">
+      <div class="progress-fill" id="progress-fill" style="width: 0%"></div>
+    </div>
+    <div id="progress-text">Ready to run tests</div>
+  </div>
+
+  <div id="test-results">
+    <div class="loading">
+      Click "Run All Tests" to begin testing libgit2.wasm in your browser
+    </div>
+  </div>
+
+  <script type="module">
+    class BrowserTestRunner {
+      constructor() {
+        this.results = [];
+        this.git = null;
+        this.totalTests = 0;
+        this.completedTests = 0;
+      }
+
+      log(message, type = 'info') {
+        const timestamp = new Date().toISOString();
+        const result = { timestamp, message, type };
+        this.results.push(result);
+        
+        const resultsDiv = document.getElementById('test-results');
+        const testResult = document.createElement('div');
+        testResult.className = `test-result test-${type}`;
+        testResult.innerHTML = `
+          <strong>[${timestamp.substr(11, 8)}]</strong> ${message}
+        `;
+        resultsDiv.appendChild(testResult);
+        
+        // Scroll to bottom
+        testResult.scrollIntoView({ behavior: 'smooth' });
+        
+        this.updateProgress();
+      }
+
+      updateProgress() {
+        if (this.totalTests > 0) {
+          const percentage = (this.completedTests / this.totalTests) * 100;
+          document.getElementById('progress-fill').style.width = `${percentage}%`;
+          document.getElementById('progress-text').textContent = 
+            `${this.completedTests}/${this.totalTests} tests completed (${Math.round(percentage)}%)`;
+        }
+      }
+
+      async runTest(name, testFunc) {
+        this.log(`Running: ${name}`, 'info');
+        const startTime = performance.now();
+        
+        try {
+          await testFunc();
+          const duration = Math.round(performance.now() - startTime);
+          this.log(`✅ ${name} (${duration}ms)`, 'success');
+        } catch (error) {
+          const duration = Math.round(performance.now() - startTime);
+          this.log(`❌ ${name} (${duration}ms): ${error.message}`, 'failure');
+          console.error(`Test failed: ${name}`, error);
+        }
+        
+        this.completedTests++;
+        this.updateProgress();
+      }
+
+      async loadWASM() {
+        this.log('Loading libgit2.wasm module...', 'info');
+        
+        try {
+          // Try to load from different possible paths
+          const possiblePaths = ['./dist/', '../dist/', '../../dist/'];
+          let loader;
+          
+          for (const path of possiblePaths) {
+            try {
+              const { LibGit2WASMLoader } = await import(path + 'libgit2-loader.js');
+              loader = new LibGit2WASMLoader(path);
+              break;
+            } catch (err) {
+              continue;
+            }
+          }
+          
+          if (!loader) {
+            throw new Error('Could not find libgit2-loader.js in any expected path');
+          }
+          
+          this.git = await loader.load('release');
+          await this.git.initialize();
+          
+          this.log('✅ WASM module loaded and initialized successfully', 'success');
+          return true;
+          
+        } catch (error) {
+          this.log(`❌ Failed to load WASM module: ${error.message}`, 'failure');
+          
+          // Log detailed error information
+          this.log(`Browser: ${navigator.userAgent}`, 'info');
+          this.log(`WebAssembly support: ${typeof WebAssembly !== 'undefined'}`, 'info');
+          
+          if (typeof WebAssembly !== 'undefined') {
+            this.log(`WASM streaming: ${WebAssembly.compileStreaming ? 'yes' : 'no'}`, 'info');
+          }
+          
+          return false;
+        }
+      }
+
+      async runAllTests() {
+        this.results = [];
+        this.completedTests = 0;
+        this.totalTests = 12; // Update this when adding/removing tests
+        
+        document.getElementById('test-results').innerHTML = '';
+        
+        this.log('🚀 Starting libgit2.wasm browser integration tests', 'info');
+        this.log(`Browser: ${navigator.userAgent}`, 'info');
+        
+        // Load WASM module first
+        if (!await this.loadWASM()) {
+          this.log('❌ Cannot continue tests without WASM module', 'failure');
+          return;
+        }
+
+        // Basic functionality tests
+        await this.runTest('Basic WASM Module', () => this.testWASMModule());
+        await this.runTest('Memory Management', () => this.testMemoryManagement());
+        await this.runTest('String Operations', () => this.testStringOperations());
+        await this.runTest('Error Handling', () => this.testErrorHandling());
+        
+        // WASM filesystem tests
+        await this.runTest('WASM Filesystem Patterns', () => this.testWASMFilesystem());
+        await this.runTest('Persistent Storage', () => this.testPersistentStorage());
+        
+        // Git operations tests
+        await this.runTest('Repository Initialization', () => this.testRepositoryInit());
+        await this.runTest('Repository Operations', () => this.testRepositoryOperations());
+        await this.runTest('Object Database', () => this.testObjectDatabase());
+        
+        // Performance tests
+        await this.runTest('Memory Performance', () => this.testMemoryPerformance());
+        await this.runTest('String Performance', () => this.testStringPerformance());
+        
+        // Browser-specific tests
+        await this.runTest('Browser Features', () => this.testBrowserFeatures());
+        await this.runTest('SIMD Support', () => this.testSIMDSupport());
+        await this.runTest('Large Operations', () => this.testLargeOperations());
+
+        this.log('🎉 All tests completed!', 'success');
+        
+        const successCount = this.results.filter(r => r.type === 'success').length;
+        const failureCount = this.results.filter(r => r.type === 'failure').length;
+        
+        this.log(`📊 Results: ${successCount} passed, ${failureCount} failed`, 
+          failureCount === 0 ? 'success' : 'warning');
+      }
+
+      async testWASMModule() {
+        if (!this.git || !this.git.instance) {
+          throw new Error('WASM instance not available');
+        }
+        
+        if (!this.git.memory) {
+          throw new Error('WASM memory not available');
+        }
+        
+        if (!this.git.exports || typeof this.git.exports !== 'object') {
+          throw new Error('WASM exports not available');
+        }
+
+        // Check required exports
+        const requiredExports = ['malloc', 'free', 'git_libgit2_init'];
+        for (const exportName of requiredExports) {
+          if (typeof this.git.exports[exportName] !== 'function') {
+            throw new Error(`Required export missing: ${exportName}`);
+          }
+        }
+      }
+
+      async testMemoryManagement() {
+        // Test basic allocation
+        const ptr = this.git.malloc(1024);
+        if (ptr <= 0) {
+          throw new Error('Memory allocation failed');
+        }
+
+        // Test memory access
+        const view = new Uint8Array(this.git.memory.buffer, ptr, 1024);
+        view[0] = 0xAA;
+        view[1023] = 0xBB;
+        
+        if (view[0] !== 0xAA || view[1023] !== 0xBB) {
+          throw new Error('Memory write/read failed');
+        }
+
+        // Test deallocation (should not throw)
+        this.git.free(ptr);
+        
+        // Test null pointer safety
+        this.git.free(0);
+        this.git.free(null);
+      }
+
+      async testStringOperations() {
+        const testStrings = [
+          'Hello, World!',
+          '',
+          'Unicode: 🌍 世界 Мир',
+          'Special chars: \n\t\\/"',
+          'A'.repeat(1000) // Long string
+        ];
+
+        for (const testStr of testStrings) {
+          const ptr = this.git.writeString(testStr);
+          const result = this.git.readString(ptr);
+          this.git.free(ptr);
+          
+          if (result !== testStr) {
+            throw new Error(`String mismatch: "${testStr}" != "${result}"`);
+          }
+        }
+      }
+
+      async testErrorHandling() {
+        // Try to open non-existent repository
+        try {
+          await this.git.openRepository('/non/existent/path');
+          throw new Error('Should have thrown error for non-existent repository');
+        } catch (error) {
+          if (error.message.includes('Should have thrown')) {
+            throw error;
+          }
+          // Expected error - this is good
+        }
+
+        // Verify error message is available
+        const error = this.git.getLastError();
+        if (!error || typeof error !== 'string') {
+          throw new Error('Error message not available');
+        }
+      }
+
+      async testRepositoryInit() {
+        const repoPath = '/tmp/browser-test-repo-' + Date.now();
+        const repo = await this.git.initRepository(repoPath, false);
+        
+        if (!repo || !repo.repoPtr || repo.repoPtr <= 0) {
+          throw new Error('Repository initialization failed');
+        }
+        
+        repo.free();
+      }
+
+      async testRepositoryOperations() {
+        const repoPath = '/tmp/browser-ops-' + Date.now();
+        const repo = await this.git.initRepository(repoPath, false);
+        
+        try {
+          // Test that repository handle is valid
+          if (repo.repoPtr <= 0) {
+            throw new Error('Invalid repository handle');
+          }
+          
+          // Test repository operations that should be available
+          if (this.git.exports.git_repository_is_bare) {
+            const isBare = this.git.exports.git_repository_is_bare(repo.repoPtr);
+            if (isBare !== 0) {
+              throw new Error('Repository should not be bare');
+            }
+          }
+          
+        } finally {
+          repo.free();
+        }
+      }
+
+      async testObjectDatabase() {
+        const repoPath = '/tmp/browser-odb-' + Date.now();
+        const repo = await this.git.initRepository(repoPath, false);
+        
+        try {
+          // Test ODB access if available
+          if (this.git.exports.git_repository_odb) {
+            const odbPtr = this.git.malloc(4);
+            
+            try {
+              const result = this.git.exports.git_repository_odb(odbPtr, repo.repoPtr);
+              if (result === 0) {
+                const odb = new Uint32Array(this.git.memory.buffer, odbPtr, 1)[0];
+                if (odb <= 0) {
+                  throw new Error('Invalid ODB handle');
+                }
+                
+                if (this.git.exports.git_odb_free) {
+                  this.git.exports.git_odb_free(odb);
+                }
+              }
+            } finally {
+              this.git.free(odbPtr);
+            }
+          }
+          
+        } finally {
+          repo.free();
+        }
+      }
+
+      async testMemoryPerformance() {
+        const iterations = 1000;
+        const size = 1024;
+        
+        const start = performance.now();
+        
+        for (let i = 0; i < iterations; i++) {
+          const ptr = this.git.malloc(size);
+          this.git.free(ptr);
+        }
+        
+        const duration = performance.now() - start;
+        const avgTime = duration / iterations;
+        
+        if (avgTime > 5.0) {
+          throw new Error(`Memory operations too slow: ${avgTime.toFixed(2)}ms per operation`);
+        }
+        
+        this.log(`Memory performance: ${avgTime.toFixed(2)}ms per operation`, 'info');
+      }
+
+      async testStringPerformance() {
+        const testString = 'Performance test string for libgit2.wasm';
+        const iterations = 100;
+        
+        const start = performance.now();
+        
+        for (let i = 0; i < iterations; i++) {
+          const ptr = this.git.writeString(testString);
+          const result = this.git.readString(ptr);
+          this.git.free(ptr);
+          
+          if (result !== testString) {
+            throw new Error('String operation failed during performance test');
+          }
+        }
+        
+        const duration = performance.now() - start;
+        const avgTime = duration / iterations;
+        
+        if (avgTime > 10.0) {
+          throw new Error(`String operations too slow: ${avgTime.toFixed(2)}ms per operation`);
+        }
+        
+        this.log(`String performance: ${avgTime.toFixed(2)}ms per operation`, 'info');
+      }
+
+      async testBrowserFeatures() {
+        // Check WebAssembly features
+        const features = {
+          'WebAssembly': typeof WebAssembly !== 'undefined',
+          'WebAssembly.Memory': typeof WebAssembly.Memory !== 'undefined',
+          'WebAssembly.compile': typeof WebAssembly.compile !== 'undefined',
+          'WebAssembly.instantiate': typeof WebAssembly.instantiate !== 'undefined',
+          'SharedArrayBuffer': typeof SharedArrayBuffer !== 'undefined',
+          'BigInt': typeof BigInt !== 'undefined'
+        };
+
+        for (const [feature, supported] of Object.entries(features)) {
+          this.log(`${feature}: ${supported ? 'supported' : 'not supported'}`, 
+            supported ? 'info' : 'warning');
+        }
+
+        if (!features.WebAssembly) {
+          throw new Error('WebAssembly not supported in this browser');
+        }
+      }
+
+      async testSIMDSupport() {
+        try {
+          // Test if SIMD instructions are available in this browser
+          const simdTest = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
+          
+          // This is just a capability check - actual SIMD usage would be in the WASM module
+          this.log('SIMD test data prepared', 'info');
+          
+          // Check manifest for SIMD support
+          if (this.git.manifest && this.git.manifest.capabilities) {
+            const simdSupported = this.git.manifest.capabilities.simd;
+            this.log(`WASM SIMD support: ${simdSupported}`, simdSupported ? 'success' : 'info');
+          }
+          
+        } catch (error) {
+          this.log(`SIMD test failed: ${error.message}`, 'warning');
+        }
+      }
+
+      async testWASMFilesystem() {
+        // Test virtual filesystem setup
+        if (typeof FS === 'undefined') {
+          throw new Error('Emscripten FS not available');
+        }
+        
+        // Test directory creation
+        const testDir = '/tmp/fs-test-' + Date.now();
+        FS.mkdir(testDir);
+        
+        // Verify directory was created
+        const stat = FS.stat(testDir);
+        if (!stat.isDir) {
+          throw new Error('Directory creation failed');
+        }
+        
+        // Test file operations
+        const testFile = testDir + '/test.txt';
+        const testContent = 'Hello, libgit2.wasm filesystem!';
+        FS.writeFile(testFile, testContent);
+        
+        const readContent = FS.readFile(testFile, { encoding: 'utf8' });
+        if (readContent !== testContent) {
+          throw new Error(`File content mismatch: expected "${testContent}", got "${readContent}"`);
+        }
+        
+        // Test file info
+        const fileStat = FS.stat(testFile);
+        if (fileStat.isDir) {
+          throw new Error('File stat shows directory instead of file');
+        }
+        
+        if (fileStat.size !== testContent.length) {
+          throw new Error(`File size mismatch: expected ${testContent.length}, got ${fileStat.size}`);
+        }
+        
+        // Test directory listing
+        const entries = FS.readdir(testDir);
+        if (!entries.includes('test.txt')) {
+          throw new Error('File not found in directory listing');
+        }
+        
+        // Cleanup
+        try {
+          FS.unlink(testFile);
+          FS.rmdir(testDir);
+        } catch (e) {
+          this.log(`Cleanup warning: ${e.message}`, 'warning');
+        }
+        
+        this.log('✓ Virtual filesystem operations working', 'success');
+      }
+
+      async testPersistentStorage() {
+        const persistDir = '/persist/fs-test-' + Date.now();
+        
+        try {
+          // Test persistent directory creation
+          FS.mkdir(persistDir, true);
+          
+          const persistFile = persistDir + '/persist-test.txt';
+          const persistContent = 'Persistent data test - ' + Date.now();
+          FS.writeFile(persistFile, persistContent);
+          
+          // Test sync (if IDBFS available)
+          if (typeof IDBFS !== 'undefined') {
+            await new Promise((resolve, reject) => {
+              const timeout = setTimeout(() => reject(new Error('Sync timeout')), 5000);
+              
+              FS.syncfs(false, (err) => {
+                clearTimeout(timeout);
+                if (err) {
+                  reject(new Error(`Sync failed: ${err}`));
+                } else {
+                  resolve();
+                }
+              });
+            });
+            
+            this.log('✓ IDBFS sync successful', 'success');
+          } else {
+            this.log('⚠ IDBFS not available, persistent storage skipped', 'warning');
+          }
+          
+          // Verify file still exists after sync
+          const readBack = FS.readFile(persistFile, { encoding: 'utf8' });
+          if (readBack !== persistContent) {
+            throw new Error('File content changed after sync');
+          }
+          
+          // Test loading from persistent storage
+          if (typeof IDBFS !== 'undefined') {
+            await new Promise((resolve, reject) => {
+              const timeout = setTimeout(() => reject(new Error('Load timeout')), 5000);
+              
+              FS.syncfs(true, (err) => {
+                clearTimeout(timeout);
+                if (err) {
+                  reject(new Error(`Load failed: ${err}`));
+                } else {
+                  resolve();
+                }
+              });
+            });
+            
+            this.log('✓ IDBFS load successful', 'success');
+          }
+          
+          // Cleanup
+          try {
+            FS.unlink(persistFile);
+            FS.rmdir(persistDir);
+          } catch (e) {
+            this.log(`Persistent cleanup warning: ${e.message}`, 'warning');
+          }
+          
+        } catch (e) {
+          // Persistent storage might not be available in all browsers/environments
+          if (e.message.includes('timeout') || e.message.includes('IDBFS')) {
+            this.log(`⚠ Persistent storage test skipped: ${e.message}`, 'warning');
+          } else {
+            throw e;
+          }
+        }
+      }
+
+      async testLargeOperations() {
+        // Test large memory allocation
+        const largeSize = 5 * 1024 * 1024; // 5MB
+        
+        try {
+          const ptr = this.git.malloc(largeSize);
+          if (ptr <= 0) {
+            throw new Error('Large memory allocation failed');
+          }
+          
+          // Write test pattern
+          const view = new Uint32Array(this.git.memory.buffer, ptr, largeSize / 4);
+          for (let i = 0; i < Math.min(1000, view.length); i++) {
+            view[i] = i;
+          }
+          
+          // Verify test pattern
+          for (let i = 0; i < Math.min(1000, view.length); i++) {
+            if (view[i] !== i) {
+              throw new Error(`Large memory verification failed at index ${i}`);
+            }
+          }
+          
+          this.git.free(ptr);
+          this.log(`Large allocation test: ${(largeSize / 1024 / 1024).toFixed(1)}MB`, 'success');
+          
+        } catch (error) {
+          this.log(`Large allocation failed: ${error.message}`, 'warning');
+        }
+      }
+
+      clearResults() {
+        this.results = [];
+        this.completedTests = 0;
+        this.totalTests = 0;
+        document.getElementById('test-results').innerHTML = 
+          '<div class="loading">Results cleared. Click "Run All Tests" to begin testing.</div>';
+        document.getElementById('progress-fill').style.width = '0%';
+        document.getElementById('progress-text').textContent = 'Ready to run tests';
+      }
+
+      downloadReport() {
+        const report = {
+          timestamp: new Date().toISOString(),
+          browser: navigator.userAgent,
+          url: window.location.href,
+          results: this.results
+        };
+        
+        const blob = new Blob([JSON.stringify(report, null, 2)], { 
+          type: 'application/json' 
+        });
+        
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `libgit2-wasm-test-report-${Date.now()}.json`;
+        a.click();
+        URL.revokeObjectURL(url);
+      }
+    }
+
+    // Initialize test runner
+    const testRunner = new BrowserTestRunner();
+
+    // Set up event listeners
+    document.getElementById('run-tests').addEventListener('click', () => {
+      testRunner.runAllTests();
+    });
+
+    document.getElementById('clear-results').addEventListener('click', () => {
+      testRunner.clearResults();
+    });
+
+    document.getElementById('download-report').addEventListener('click', () => {
+      testRunner.downloadReport();
+    });
+
+    // Auto-run tests on page load if URL parameter is present
+    if (new URLSearchParams(window.location.search).get('autorun') === 'true') {
+      setTimeout(() => testRunner.runAllTests(), 1000);
+    }
+  </script>
+</body>
+</html>

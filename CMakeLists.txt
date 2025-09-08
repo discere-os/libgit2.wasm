@@ -25,6 +25,78 @@ option(BUILD_CLI               "Build the command-line interface"               
 option(BUILD_EXAMPLES          "Build library usage example apps"                      OFF)
 option(BUILD_FUZZERS           "Build the fuzz targets"                                OFF)
 
+# WASM-specific configuration
+if(EMSCRIPTEN)
+   option(GIT_IO_WASM             "Enable WASM I/O patterns"                               ON)
+   option(GIT_FS_VIRTUAL          "Enable virtual filesystem support"                     ON)
+   option(ENABLE_SIMD             "Enable SIMD optimizations for WASM"                   OFF)
+   
+   # WASM-specific defaults
+   set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build Shared Library (OFF for WASM)" FORCE)
+   set(BUILD_TESTS OFF CACHE BOOL "Build Tests (disabled for WASM)" FORCE)
+   set(BUILD_CLI OFF CACHE BOOL "Build CLI (disabled for WASM)" FORCE)
+   set(BUILD_EXAMPLES OFF CACHE BOOL "Build Examples (disabled for WASM)" FORCE)
+   set(BUILD_FUZZERS OFF CACHE BOOL "Build Fuzzers (disabled for WASM)" FORCE)
+   
+   # WASM-compatible backend selection
+   set(USE_SSH OFF CACHE STRING "SSH disabled for WASM" FORCE)
+   set(USE_HTTPS "OpenSSL-Dynamic" CACHE STRING "HTTPS via OpenSSL.wasm")
+   set(USE_SHA1 "HTTPS" CACHE STRING "SHA1 via OpenSSL for SIMD potential")
+   set(USE_SHA256 "HTTPS" CACHE STRING "SHA256 via OpenSSL for SIMD potential")
+   set(USE_HTTP_PARSER "builtin" CACHE STRING "Builtin HTTP parser")
+   set(USE_REGEX "builtin" CACHE STRING "Builtin regex")
+   set(USE_COMPRESSION "builtin" CACHE STRING "Builtin compression")
+   
+   # Configure Emscripten flags
+   set(EMSCRIPTEN_BASE_FLAGS 
+     "-sALLOW_MEMORY_GROWTH=1"
+     "-sINITIAL_MEMORY=67108864"
+     "-sFORCE_FILESYSTEM=1"
+     "-sEXPORTED_RUNTIME_METHODS=['FS','IDBFS','PATH','cwrap','ccall']"
+     "-sWASM_ASYNC_COMPILATION=0"
+     "-sNO_EXIT_RUNTIME=1"
+     "-sENVIRONMENT=web,worker"
+     "-sMODULARIZE=1"
+     "-sEXPORT_NAME=LibGit2Module"
+   )
+   
+   if(GIT_FS_VIRTUAL)
+     list(APPEND EMSCRIPTEN_BASE_FLAGS "-sFS_DEBUG=0")
+     add_definitions(-DGIT_FS_VIRTUAL=1)
+   endif()
+   
+   if(GIT_IO_WASM)
+     add_definitions(-DGIT_IO_WASM=1)
+   endif()
+   
+   if(ENABLE_SIMD)
+     list(APPEND EMSCRIPTEN_BASE_FLAGS "-msimd128")
+     add_definitions(-DGIT_WASM_SIMD=1)
+     
+     # Add SIMD source files
+     file(GLOB WASM_SIMD_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/wasm/*simd*.c")
+     if(WASM_SIMD_SOURCES)
+       target_sources(git2 PRIVATE ${WASM_SIMD_SOURCES})
+     endif()
+   endif()
+   
+   if(USE_THREADS STREQUAL "pthreads")
+     list(APPEND EMSCRIPTEN_BASE_FLAGS "-pthread" "-sPTHREAD_POOL_SIZE=4" "-sPROXY_TO_PTHREAD")
+     add_definitions(-DUSE_THREADS=1)
+     
+     # Add threading source files
+     file(GLOB WASM_THREADING_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/wasm/*threading*.c")
+     if(WASM_THREADING_SOURCES)
+       target_sources(git2 PRIVATE ${WASM_THREADING_SOURCES})
+     endif()
+   endif()
+   
+   string(REPLACE ";" " " EMSCRIPTEN_FLAGS_STR "${EMSCRIPTEN_BASE_FLAGS}")
+   set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${EMSCRIPTEN_FLAGS_STR}")
+   set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${EMSCRIPTEN_FLAGS_STR}")
+   
+endif()
+
 # Feature enablement and backend selection
    set(USE_THREADS             "" CACHE STRING "Use threads for parallel processing when possible. One of ON, OFF, or a specific provider: pthreads or win32. (Defaults to ON.)")
    set(USE_SSH                 "" CACHE STRING "Enables SSH support and optionally selects provider. One of ON, OFF, or a specific provider: libssh2 or exec. (Defaults to OFF.)")

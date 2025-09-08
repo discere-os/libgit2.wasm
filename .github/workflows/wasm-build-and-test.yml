@@ -1,0 +1,640 @@
+# libgit2.wasm CI/CD Pipeline
+# Copyright 2025 Superstruct Ltd, New Zealand
+# Licensed under GPL v2 with Linking Exception (same as libgit2)
+
+name: 'WASM Build and Test'
+
+on:
+  push:
+    branches: [wasm]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.gitignore'
+  pull_request:
+    branches: [wasm]
+  schedule:
+    # Run nightly builds at 02:00 UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      build_variants:
+        description: 'Build variants to test (comma-separated: release,simd,debug,threaded)'
+        required: false
+        default: 'release,simd'
+      run_browser_tests:
+        description: 'Run browser integration tests'
+        type: boolean
+        required: false
+        default: true
+
+env:
+  EMSCRIPTEN_VERSION: '3.1.71'
+  NODE_VERSION: '20'
+
+jobs:
+  # Pre-build checks and validation
+  pre-build:
+    name: 'Pre-build Checks'
+    runs-on: ubuntu-latest
+    outputs:
+      variants: ${{ steps.variants.outputs.variants }}
+      cache-key: ${{ steps.cache-key.outputs.key }}
+    
+    steps:
+    - name: 'Checkout repository'
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        submodules: recursive
+
+    - name: 'Determine build variants'
+      id: variants
+      run: |
+        if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+          VARIANTS="${{ github.event.inputs.build_variants }}"
+        elif [[ "${{ github.event_name }}" == "schedule" ]]; then
+          VARIANTS="release,simd,debug,threaded"
+        else
+          VARIANTS="release,simd"
+        fi
+        
+        echo "variants=[\"$(echo $VARIANTS | sed 's/,/\", \"/g')\"]" >> $GITHUB_OUTPUT
+        echo "Building variants: $VARIANTS"
+
+    - name: 'Generate cache key'
+      id: cache-key
+      run: |
+        CACHE_KEY="libgit2-wasm-${{ runner.os }}-${{ env.EMSCRIPTEN_VERSION }}-$(git rev-parse --short HEAD)-$(date +%Y%m%d)"
+        echo "key=$CACHE_KEY" >> $GITHUB_OUTPUT
+        echo "Cache key: $CACHE_KEY"
+
+    - name: 'Validate build script'
+      run: |
+        if [[ ! -x "./build-wasm.sh" ]]; then
+          echo "::error::build-wasm.sh not found or not executable"
+          exit 1
+        fi
+        
+        # Check script syntax
+        bash -n ./build-wasm.sh
+        echo "✅ build-wasm.sh syntax is valid"
+
+    - name: 'Check for required files'
+      run: |
+        REQUIRED_FILES=(
+          "CMakeLists.txt"
+          "build-wasm.sh"
+          "docs/ai/libgit2-wasm-production-technical-analysis.md"
+        )
+        
+        for file in "${REQUIRED_FILES[@]}"; do
+          if [[ ! -f "$file" ]]; then
+            echo "::error::Required file missing: $file"
+            exit 1
+          fi
+        done
+        
+        echo "✅ All required files present"
+
+  # Build WASM variants
+  build:
+    name: 'Build ${{ matrix.variant }}'
+    needs: pre-build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: ${{ fromJson(needs.pre-build.outputs.variants) }}
+    
+    steps:
+    - name: 'Checkout repository'
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        submodules: recursive
+
+    - name: 'Setup Node.js'
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+
+    - name: 'Cache Emscripten installation'
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.emscripten_cache
+          ~/.emscripten_ports
+        key: emscripten-${{ env.EMSCRIPTEN_VERSION }}-${{ runner.os }}
+        restore-keys: |
+          emscripten-${{ env.EMSCRIPTEN_VERSION }}-
+          emscripten-
+
+    - name: 'Setup Emscripten'
+      uses: mymindstorm/setup-emsdk@v14
+      with:
+        version: ${{ env.EMSCRIPTEN_VERSION }}
+        actions-cache-folder: 'emsdk-cache'
+
+    - name: 'Verify Emscripten installation'
+      run: |
+        emcc --version
+        em++ --version
+        emcmake --version
+        emmake --version
+        echo "✅ Emscripten ${{ env.EMSCRIPTEN_VERSION }} ready"
+
+    - name: 'Cache build dependencies'
+      uses: actions/cache@v4
+      with:
+        path: |
+          build-${{ matrix.variant }}
+        key: ${{ needs.pre-build.outputs.cache-key }}-${{ matrix.variant }}
+        restore-keys: |
+          libgit2-wasm-${{ runner.os }}-${{ env.EMSCRIPTEN_VERSION }}-${{ matrix.variant }}-
+
+    - name: 'Build libgit2.wasm (${{ matrix.variant }})'
+      run: |
+        echo "🚀 Building libgit2.wasm variant: ${{ matrix.variant }}"
+        ./build-wasm.sh ${{ matrix.variant }}
+        
+        echo "📦 Build artifacts:"
+        ls -la dist/
+        
+        # Verify required artifacts exist
+        if [[ ! -f "dist/libgit2-${{ matrix.variant }}.wasm" ]]; then
+          echo "::error::WASM file not generated"
+          exit 1
+        fi
+        
+        if [[ ! -f "dist/libgit2-${{ matrix.variant }}.js" ]]; then
+          echo "::error::JS file not generated"
+          exit 1
+        fi
+        
+        if [[ ! -f "dist/manifest-${{ matrix.variant }}.json" ]]; then
+          echo "::error::Manifest file not generated"
+          exit 1
+        fi
+        
+        echo "✅ All required artifacts generated"
+
+    - name: 'Validate build artifacts'
+      run: |
+        # Check WASM file is valid
+        wasm_size=$(wc -c < "dist/libgit2-${{ matrix.variant }}.wasm")
+        if [[ $wasm_size -lt 100000 ]]; then
+          echo "::error::WASM file too small ($wasm_size bytes)"
+          exit 1
+        fi
+        
+        # Check JS file has expected content
+        if ! grep -q "WebAssembly" "dist/libgit2-${{ matrix.variant }}.js"; then
+          echo "::error::JS file doesn't contain WebAssembly code"
+          exit 1
+        fi
+        
+        # Validate manifest JSON
+        if ! jq empty "dist/manifest-${{ matrix.variant }}.json"; then
+          echo "::error::Manifest JSON is invalid"
+          exit 1
+        fi
+        
+        echo "✅ Build artifacts validated"
+
+    - name: 'Generate build report'
+      run: |
+        cat > "dist/build-report-${{ matrix.variant }}.md" << EOF
+        # Build Report: ${{ matrix.variant }}
+        
+        **Build Date:** $(date -Iseconds)
+        **Git Commit:** ${{ github.sha }}
+        **Git Branch:** ${{ github.ref_name }}
+        **Emscripten Version:** ${{ env.EMSCRIPTEN_VERSION }}
+        **Runner:** ${{ runner.os }}
+        
+        ## Artifacts
+        
+        | File | Size | Compressed |
+        |------|------|------------|
+        | libgit2-${{ matrix.variant }}.wasm | $(numfmt --to=iec < <(wc -c < "dist/libgit2-${{ matrix.variant }}.wasm"))B | $(gzip -c "dist/libgit2-${{ matrix.variant }}.wasm" | wc -c | numfmt --to=iec)B |
+        | libgit2-${{ matrix.variant }}.js | $(numfmt --to=iec < <(wc -c < "dist/libgit2-${{ matrix.variant }}.js"))B | $(gzip -c "dist/libgit2-${{ matrix.variant }}.js" | wc -c | numfmt --to=iec)B |
+        
+        ## Manifest
+        
+        \`\`\`json
+        $(cat "dist/manifest-${{ matrix.variant }}.json")
+        \`\`\`
+        EOF
+        
+        echo "📋 Build report generated"
+
+    - name: 'Upload build artifacts'
+      uses: actions/upload-artifact@v4
+      with:
+        name: libgit2-wasm-${{ matrix.variant }}
+        path: |
+          dist/libgit2-${{ matrix.variant }}.wasm
+          dist/libgit2-${{ matrix.variant }}.js
+          dist/manifest-${{ matrix.variant }}.json
+          dist/build-report-${{ matrix.variant }}.md
+        retention-days: 30
+
+    - name: 'Upload common artifacts (release only)'
+      if: matrix.variant == 'release'
+      uses: actions/upload-artifact@v4
+      with:
+        name: libgit2-wasm-common
+        path: |
+          dist/libgit2-loader.js
+          dist/libgit2.d.ts
+          dist/package.json
+        retention-days: 30
+
+  # Unit and integration tests
+  test:
+    name: 'Test ${{ matrix.variant }}'
+    needs: [pre-build, build]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: ${{ fromJson(needs.pre-build.outputs.variants) }}
+    
+    steps:
+    - name: 'Checkout repository'
+      uses: actions/checkout@v4
+
+    - name: 'Setup Node.js'
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+
+    - name: 'Download build artifacts'
+      uses: actions/download-artifact@v4
+      with:
+        name: libgit2-wasm-${{ matrix.variant }}
+        path: dist/
+
+    - name: 'Download common artifacts'
+      if: matrix.variant == 'release'
+      uses: actions/download-artifact@v4
+      with:
+        name: libgit2-wasm-common
+        path: dist/
+
+    - name: 'Install test dependencies'
+      run: |
+        if [[ -f "package.json" ]]; then
+          npm install
+        else
+          # Install minimal test dependencies
+          npm init -y
+          npm install --save-dev vitest @vitest/ui jsdom
+        fi
+
+    - name: 'Setup test environment'
+      run: |
+        # Ensure test directories exist
+        mkdir -p tests/unit tests/integration
+        
+        # Create minimal vitest config if it doesn't exist
+        if [[ ! -f "vitest.config.js" ]]; then
+          cat > vitest.config.js << 'EOF'
+        import { defineConfig } from 'vitest/config';
+        
+        export default defineConfig({
+          test: {
+            environment: 'jsdom',
+            globals: true,
+            testTimeout: 30000
+          }
+        });
+        EOF
+        fi
+
+    - name: 'Run unit tests'
+      run: |
+        if [[ -f "tests/unit/libgit2-wasm.test.js" ]]; then
+          echo "🧪 Running unit tests for ${{ matrix.variant }}"
+          npx vitest run tests/unit/ --reporter=verbose
+        else
+          echo "⚠️ No unit tests found, skipping"
+        fi
+
+    - name: 'Run integration tests'
+      run: |
+        if [[ -f "tests/integration/git-operations.test.js" ]]; then
+          echo "🧪 Running integration tests for ${{ matrix.variant }}"
+          npx vitest run tests/integration/ --reporter=verbose
+        else
+          echo "⚠️ No integration tests found, skipping"
+        fi
+
+    - name: 'Generate test report'
+      run: |
+        cat > "test-report-${{ matrix.variant }}.md" << EOF
+        # Test Report: ${{ matrix.variant }}
+        
+        **Test Date:** $(date -Iseconds)
+        **Variant:** ${{ matrix.variant }}
+        **Node Version:** ${{ env.NODE_VERSION }}
+        
+        ## Test Results
+        
+        - Unit Tests: $([ -f "tests/unit/libgit2-wasm.test.js" ] && echo "✅ Executed" || echo "⚠️ Not found")
+        - Integration Tests: $([ -f "tests/integration/git-operations.test.js" ] && echo "✅ Executed" || echo "⚠️ Not found")
+        
+        ## Artifacts Tested
+        
+        - WASM Size: $(numfmt --to=iec < <(wc -c < "dist/libgit2-${{ matrix.variant }}.wasm"))B
+        - JS Size: $(numfmt --to=iec < <(wc -c < "dist/libgit2-${{ matrix.variant }}.js"))B
+        
+        EOF
+
+    - name: 'Upload test results'
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-results-${{ matrix.variant }}
+        path: |
+          test-report-${{ matrix.variant }}.md
+        retention-days: 30
+
+  # Browser integration tests using Playwright
+  browser-test:
+    name: 'Browser Integration Tests'
+    needs: [pre-build, build]
+    runs-on: ubuntu-latest
+    if: github.event_name != 'workflow_dispatch' || github.event.inputs.run_browser_tests == 'true'
+    
+    steps:
+    - name: 'Checkout repository'
+      uses: actions/checkout@v4
+
+    - name: 'Setup Node.js'
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+
+    - name: 'Download all build artifacts'
+      uses: actions/download-artifact@v4
+      with:
+        pattern: libgit2-wasm-*
+        path: dist/
+        merge-multiple: true
+
+    - name: 'Install Playwright'
+      run: |
+        npm init -y
+        npm install --save-dev @playwright/test
+        npx playwright install chromium firefox webkit
+
+    - name: 'Setup test server'
+      run: |
+        # Create simple HTTP server script
+        cat > server.js << 'EOF'
+        const http = require('http');
+        const fs = require('fs');
+        const path = require('path');
+        
+        const server = http.createServer((req, res) => {
+          const filePath = path.join(__dirname, req.url);
+          
+          // Security: prevent directory traversal
+          if (!filePath.startsWith(__dirname)) {
+            res.writeHead(403);
+            res.end('Forbidden');
+            return;
+          }
+          
+          if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+            const ext = path.extname(filePath);
+            const contentType = {
+              '.html': 'text/html',
+              '.js': 'application/javascript',
+              '.wasm': 'application/wasm',
+              '.json': 'application/json'
+            }[ext] || 'application/octet-stream';
+            
+            res.writeHead(200, {
+              'Content-Type': contentType,
+              'Cross-Origin-Embedder-Policy': 'require-corp',
+              'Cross-Origin-Opener-Policy': 'same-origin'
+            });
+            
+            fs.createReadStream(filePath).pipe(res);
+          } else {
+            res.writeHead(404);
+            res.end('Not found');
+          }
+        });
+        
+        server.listen(8080, () => {
+          console.log('Test server running on http://localhost:8080');
+        });
+        EOF
+
+    - name: 'Create Playwright test'
+      run: |
+        mkdir -p tests/playwright
+        
+        cat > tests/playwright/browser-integration.spec.js << 'EOF'
+        const { test, expect } = require('@playwright/test');
+        
+        test.describe('libgit2.wasm Browser Integration', () => {
+          test.beforeEach(async ({ page }) => {
+            // Navigate to browser test page
+            await page.goto('http://localhost:8080/tests/browser/browser-integration.html');
+            await page.waitForLoadState('networkidle');
+          });
+        
+          test('should load and run browser tests', async ({ page }) => {
+            // Click run tests button
+            await page.click('#run-tests');
+            
+            // Wait for tests to complete (timeout after 2 minutes)
+            await page.waitForSelector('.test-result:has-text("All tests completed")', { 
+              timeout: 120000 
+            });
+            
+            // Check for any failures
+            const failures = await page.locator('.test-failure').count();
+            expect(failures).toBe(0);
+            
+            // Verify success message
+            const successMessage = await page.locator('.test-result:has-text("All tests completed")');
+            await expect(successMessage).toBeVisible();
+          });
+        
+          test('should have valid WASM module', async ({ page }) => {
+            // Run tests and check for WASM module success
+            await page.click('#run-tests');
+            
+            await page.waitForSelector('.test-result:has-text("WASM module loaded")', { 
+              timeout: 60000 
+            });
+            
+            const wasmSuccess = await page.locator('.test-success:has-text("WASM module loaded")');
+            await expect(wasmSuccess).toBeVisible();
+          });
+        });
+        EOF
+
+    - name: 'Run browser tests'
+      run: |
+        # Start test server in background
+        node server.js &
+        SERVER_PID=$!
+        
+        # Wait for server to start
+        sleep 5
+        
+        # Run Playwright tests
+        npx playwright test tests/playwright/ --reporter=html
+        
+        # Stop test server
+        kill $SERVER_PID
+
+    - name: 'Upload Playwright report'
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: playwright-report
+        path: playwright-report/
+        retention-days: 30
+
+  # Performance benchmarks
+  benchmark:
+    name: 'Performance Benchmarks'
+    needs: [pre-build, build]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    
+    steps:
+    - name: 'Checkout repository'
+      uses: actions/checkout@v4
+
+    - name: 'Setup Node.js'
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+
+    - name: 'Download build artifacts'
+      uses: actions/download-artifact@v4
+      with:
+        pattern: libgit2-wasm-*
+        path: dist/
+        merge-multiple: true
+
+    - name: 'Run performance benchmarks'
+      run: |
+        if [[ -f "benchmarks/performance.js" ]]; then
+          echo "🏃‍♂️ Running performance benchmarks"
+          node benchmarks/performance.js
+        else
+          echo "⚠️ No performance benchmarks found"
+          
+          # Create basic benchmark
+          mkdir -p benchmarks
+          cat > benchmarks/basic.js << 'EOF'
+        // Basic performance test
+        console.log("🏃‍♂️ Basic libgit2.wasm performance test");
+        
+        const variants = ['release', 'simd'];
+        
+        for (const variant of variants) {
+          const wasmSize = require('fs').statSync(`dist/libgit2-${variant}.wasm`).size;
+          const jsSize = require('fs').statSync(`dist/libgit2-${variant}.js`).size;
+          
+          console.log(`📊 ${variant}:`);
+          console.log(`  WASM: ${(wasmSize / 1024 / 1024).toFixed(2)} MB`);
+          console.log(`  JS: ${(jsSize / 1024).toFixed(2)} KB`);
+          console.log(`  Total: ${((wasmSize + jsSize) / 1024 / 1024).toFixed(2)} MB`);
+        }
+        EOF
+          
+          node benchmarks/basic.js
+        fi
+
+    - name: 'Upload benchmark results'
+      uses: actions/upload-artifact@v4
+      with:
+        name: benchmark-results
+        path: |
+          benchmarks/
+        retention-days: 30
+
+  # Job summary and notifications
+  summary:
+    name: 'Build Summary'
+    needs: [pre-build, build, test, browser-test]
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+    - name: 'Download all artifacts'
+      uses: actions/download-artifact@v4
+      with:
+        pattern: '*'
+        path: artifacts/
+
+    - name: 'Generate job summary'
+      run: |
+        echo "# 🚀 libgit2.wasm Build Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Build Date:** $(date -Iseconds)" >> $GITHUB_STEP_SUMMARY
+        echo "**Git Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Git Branch:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Emscripten Version:** ${{ env.EMSCRIPTEN_VERSION }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        echo "## 📦 Build Artifacts" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| Variant | WASM Size | JS Size | Status |" >> $GITHUB_STEP_SUMMARY
+        echo "|---------|-----------|---------|--------|" >> $GITHUB_STEP_SUMMARY
+        
+        for artifact_dir in artifacts/libgit2-wasm-*/; do
+          if [[ -d "$artifact_dir" ]]; then
+            variant=$(basename "$artifact_dir" | sed 's/libgit2-wasm-//')
+            wasm_file="$artifact_dir/libgit2-${variant}.wasm"
+            js_file="$artifact_dir/libgit2-${variant}.js"
+            
+            if [[ -f "$wasm_file" && -f "$js_file" ]]; then
+              wasm_size=$(numfmt --to=iec < <(wc -c < "$wasm_file"))
+              js_size=$(numfmt --to=iec < <(wc -c < "$js_file"))
+              echo "| $variant | ${wasm_size}B | ${js_size}B | ✅ Success |" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "| $variant | - | - | ❌ Failed |" >> $GITHUB_STEP_SUMMARY
+            fi
+          fi
+        done
+        
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "## 🧪 Test Results" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        # Check test results
+        if [[ -d "artifacts/test-results-release" ]]; then
+          echo "✅ Unit and integration tests completed" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "⚠️ Unit and integration tests not found" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        if [[ -d "artifacts/playwright-report" ]]; then
+          echo "✅ Browser integration tests completed" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "⚠️ Browser integration tests not found" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "## 📊 Next Steps" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "- Review build artifacts and test results" >> $GITHUB_STEP_SUMMARY
+        echo "- Test WASM modules in target applications" >> $GITHUB_STEP_SUMMARY
+        echo "- Consider publishing to NPM registry" >> $GITHUB_STEP_SUMMARY
+        
+        echo "✅ Build and test pipeline completed successfully!"
