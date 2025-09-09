@@ -29,7 +29,7 @@ on:
         default: true
 
 env:
-  EMSCRIPTEN_VERSION: '3.1.71'
+  EMSCRIPTEN_VERSION: '4.0.14'
   NODE_VERSION: '20'
 
 jobs:

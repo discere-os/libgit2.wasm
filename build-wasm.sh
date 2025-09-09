@@ -6,7 +6,7 @@
 set -euo pipefail
 
 VARIANT="${1:-release}"
-EMSCRIPTEN_VERSION="3.1.71"
+EMSCRIPTEN_VERSION="4.0.14"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Color output
